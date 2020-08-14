@@ -191,6 +191,7 @@ void clientInstallWriteHandler(client *c) {
          * a system call. We'll only really install the write handler if
          * we'll not be able to write the whole reply at once. */
         c->flags |= CLIENT_PENDING_WRITE;
+        //添加至server.clients_pending_write列表，多线程处理回写内容
         listAddNodeHead(server.clients_pending_write,c);
     }
 }
@@ -1280,6 +1281,7 @@ int writeToClient(client *c, int handler_installed) {
 
     while(clientHasPendingReplies(c)) {
         if (c->bufpos > 0) {
+            //优先写入buf数据
             nwritten = connWrite(c->conn,c->buf+c->sentlen,c->bufpos-c->sentlen);
             if (nwritten <= 0) break;
             c->sentlen += nwritten;
@@ -1292,6 +1294,7 @@ int writeToClient(client *c, int handler_installed) {
                 c->sentlen = 0;
             }
         } else {
+            //当写完buf数据后 写入reply链表数据
             o = listNodeValue(listFirst(c->reply));
             objlen = o->used;
 
@@ -1782,6 +1785,7 @@ void commandProcessed(client *c) {
 int processCommandAndResetClient(client *c) {
     int deadclient = 0;
     server.current_client = c;
+    //执行客户端命令
     if (processCommand(c) == C_OK) {
         commandProcessed(c);
     }
@@ -1859,6 +1863,7 @@ void processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->flags & CLIENT_PENDING_READ) {
+                //当前为I0线程，不执行命令，交给主线程处理
                 c->flags |= CLIENT_PENDING_COMMAND;
                 break;
             }
@@ -2928,8 +2933,10 @@ void *IOThreadMain(void *myid) {
         while((ln = listNext(&li))) {
             client *c = listNodeValue(ln);
             if (io_threads_op == IO_THREADS_OP_WRITE) {
+                //返回客户端数据
                 writeToClient(c,0);
             } else if (io_threads_op == IO_THREADS_OP_READ) {
+                //从客户端读取数据
                 readQueryFromClient(c->conn);
             } else {
                 serverPanic("io_threads_op value is unknown");
@@ -2959,6 +2966,7 @@ void initThreadedIO(void) {
     /* Spawn and initialize the I/O threads. */
     for (int i = 0; i < server.io_threads_num; i++) {
         /* Things we do for all the threads including the main thread. */
+        //创建列表
         io_threads_list[i] = listCreate();
         if (i == 0) continue; /* Thread 0 is the main thread. */
 
@@ -2966,7 +2974,9 @@ void initThreadedIO(void) {
         pthread_t tid;
         pthread_mutex_init(&io_threads_mutex[i],NULL);
         io_threads_pending[i] = 0;
+        //请求锁,让线程等待锁
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
+        //创建线程
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
@@ -2980,6 +2990,7 @@ void startThreadedIO(void) {
     if (tio_debug) printf("--- STARTING THREADED IO ---\n");
     serverAssert(io_threads_active == 0);
     for (int j = 1; j < server.io_threads_num; j++)
+
         pthread_mutex_unlock(&io_threads_mutex[j]);
     io_threads_active = 1;
 }
@@ -3037,6 +3048,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     if (tio_debug) printf("%d TOTAL WRITE pending clients\n", processed);
 
     /* Distribute the clients across N different lists. */
+    //给多个线程分配任务
     listIter li;
     listNode *ln;
     listRewind(server.clients_pending_write,&li);
@@ -3051,13 +3063,16 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 
     /* Give the start condition to the waiting threads, by setting the
      * start condition atomic var. */
+    //设置线程全部写入状态
     io_threads_op = IO_THREADS_OP_WRITE;
     for (int j = 1; j < server.io_threads_num; j++) {
         int count = listLength(io_threads_list[j]);
+        //设置线程pending数量
         io_threads_pending[j] = count;
     }
 
     /* Also use the main thread to process a slice of clients. */
+    //主线程处理一部分请求threadid=0的请求
     listRewind(io_threads_list[0],&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -3066,6 +3081,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     listEmpty(io_threads_list[0]);
 
     /* Wait for all the other threads to end their work. */
+    //等待其它线程都处理完毕
     while(1) {
         unsigned long pending = 0;
         for (int j = 1; j < server.io_threads_num; j++)
@@ -3076,6 +3092,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 
     /* Run the list of clients again to install the write handler where
      * needed. */
+    //遍历客户端列表，对一些挂起没有回写成功的客户端，通过异步方式sendReplyToClient回写
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -3103,6 +3120,7 @@ int postponeClientRead(client *c) {
         !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_PENDING_READ)))
     {
         c->flags |= CLIENT_PENDING_READ;
+        //多线程异步读取内容
         listAddNodeHead(server.clients_pending_read,c);
         return 1;
     } else {
@@ -3124,6 +3142,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     if (tio_debug) printf("%d TOTAL READ pending clients\n", processed);
 
     /* Distribute the clients across N different lists. */
+    //给多个线程分配任务
     listIter li;
     listNode *ln;
     listRewind(server.clients_pending_read,&li);
@@ -3137,6 +3156,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
 
     /* Give the start condition to the waiting threads, by setting the
      * start condition atomic var. */
+    //从threadi=1~ server.io_threads_num任务数调整
     io_threads_op = IO_THREADS_OP_READ;
     for (int j = 1; j < server.io_threads_num; j++) {
         int count = listLength(io_threads_list[j]);
@@ -3144,6 +3164,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     }
 
     /* Also use the main thread to process a slice of clients. */
+    //主线程处理一部分请求
     listRewind(io_threads_list[0],&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -3152,6 +3173,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     listEmpty(io_threads_list[0]);
 
     /* Wait for all the other threads to end their work. */
+    //等待所有read任务处理完成
     while(1) {
         unsigned long pending = 0;
         for (int j = 1; j < server.io_threads_num; j++)
@@ -3166,9 +3188,9 @@ int handleClientsWithPendingReadsUsingThreads(void) {
         client *c = listNodeValue(ln);
         c->flags &= ~CLIENT_PENDING_READ;
         listDelNode(server.clients_pending_read,ln);
-
         if (c->flags & CLIENT_PENDING_COMMAND) {
             c->flags &= ~CLIENT_PENDING_COMMAND;
+            //执行客户端命令
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid
                  * processing the client later. So we just go

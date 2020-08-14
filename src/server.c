@@ -2913,7 +2913,9 @@ void initServer(void) {
 
     /* Register before and after sleep handlers (note this needs to be done
      * before loading persistence since it is used by processEventsWhileBlocked. */
+    //io事件处理前执行函数
     aeSetBeforeSleepProc(server.el,beforeSleep);
+    //io事件处理后执行函数
     aeSetAfterSleepProc(server.el,afterSleep);
 
     /* Open the AOF file if needed. */
@@ -2951,6 +2953,7 @@ void initServer(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast() {
     bioInit();
+    //初始化线程
     initThreadedIO();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
@@ -5143,8 +5146,10 @@ int main(int argc, char **argv) {
     #endif
         //加载系统扩展
         moduleLoadFromQueue();
+        //访问权限控制
         ACLLoadUsersAtStartup();
         InitServerLast();
+        //从文件load数据
         loadDataFromDisk();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
